@@ -1,0 +1,10 @@
+The files in this directory are are used by Pancho to add vendor support.  
+They will be included if they end in .pm and include a device_types method.  
+The 'Plugin.sample' file in this same directory provides a skeleton of a basic
+plugin file.  The methods that are in it are required in order for the
+plugin to work properly (i.e. these are invoked by Pancho and therefore must
+exist).  Any number of devices can be handled by a plugin but it is probably
+best to keep it to one vendor just for clarity.
+
+If you write a plugin please submit it to the Pancho HQ to be included in 
+future releases.

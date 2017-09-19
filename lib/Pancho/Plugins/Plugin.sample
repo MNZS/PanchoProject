@@ -1,0 +1,83 @@
+# Set this to the Pancho::<filename>
+package Pancho::filename;
+
+use strict;
+use Net::SNMP;
+
+
+# these are device types we can handle in this plugin
+# the names should be contained in the sysdescr string
+# returned by the devices
+# the key is the name and the value is the vendor description
+my %types = (
+              sampledevice   => "Sample Vendor",
+            );
+
+#------------------------------------------------------------------------------- 
+# device_types
+# IN : N/A
+# OUT: returns an array ref of devices this plugin can handle
+#------------------------------------------------------------------------------- 
+sub device_types {
+   my $self = shift;
+   my @devices = keys %types;
+   return \@devices;
+}
+
+#------------------------------------------------------------------------------- 
+# device_description
+# IN : scalar containing sysdescr
+# OUT: returns scalar containing description or 'Unknown' if it doesn't exist
+#------------------------------------------------------------------------------- 
+sub device_description {
+   my $self = shift;
+   my $name = shift || return 0;
+   my $sn = '';
+   if ($sn = (grep { $name =~ m/$_/gi } keys %types)[0]) {
+     return $types{$sn};
+   } else {
+      return "Unknown";
+   }
+}
+
+#------------------------------------------------------------------------------- 
+# process_device - figures out what device type we have and tries to
+# operate on it based on args given
+# IN : args - hash ref containing various program args
+#      opts - hash ref of options passed into program
+#------------------------------------------------------------------------------- 
+sub process_device {
+   my $self = shift;
+   my $args = shift;
+   my $opts = shift;
+
+   ## add code here to handle the various transfer types
+   ## and options
+   ## You'll need to have the ability to handle (or at least
+   ## provide output for) the following:
+   ## upload & download
+   ## commit
+   ## reload
+
+   ## to deal create an snmp session you can use the snmp object
+   ## stored in args
+   ## it will return a Net::SNMP object instantiated with the proper
+   ## host and snmp settings
+   ## example:
+   ## my $snmp_obj = $args->{snmp}->create_snmp($args);
+   ## 
+   ## Now you can proceed to use normal Net::SNMP methods on 
+   ## the returned object.
+   ## $snmp_obj->set_request($some_oid,INTEGER,$val);
+
+   ## if you need to log an error you can do so by setting the
+   ## string in $args->{err} and then calling
+   ## $args->{log}->log_action($args)
+   ## example:
+   ## $args->{err} = "Sample Error";
+   ## $args->{log}->log_action($args);
+}
+
+
+# this must be here or else it won't return true
+1;

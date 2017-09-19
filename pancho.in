@@ -1,0 +1,425 @@
+#!/usr/bin/perl -w
+
+###################################################################
+###################################################################
+##
+## $Id: pancho.in,v 1.32 2005/05/24 19:10:30 cmenzes Exp $
+##
+##                    PANCHO
+##            Copyright (C) 2001-2005 
+##             http://www.pancho.org/
+##
+## This program is free software; you can redistribute it and/or modify
+## it under the terms of the GNU General Public License as published by
+## the Free Software Foundation; either version 2 of the License, or
+## (at your option) any later version.
+##
+## This program is distributed in the hope that it will be useful,
+## but WITHOUT ANY WARRANTY; without even the implied warranty of
+## MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+## GNU General Public License for more details.
+##
+## You should have received a copy of the GNU General Public License
+## along with this program; if not, write to the Free Software
+## Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
+##
+###################################################################
+###################################################################
+
+## CUSTOM LIB ##
+
+## CONFIG FILE ##
+
+############ NO FURTHER EDITING SHOULD BE REQUIRED. ###############
+############ DOING SO IS AT YOUR OWN RISK.          ###############
+use strict;
+# std modules
+use Getopt::Long;
+use Config::IniFiles;
+use Parallel::ForkManager;
+
+# custom modules
+use Pancho::Snmp;
+use Pancho::Util;
+use Pancho::Log;
+
+#----------------                                                                                                    
+# GLOBALS                                                                                                            
+#---------------- 
+## pancho release version
+## the extra new line needs to be here for MakeMaker
+## to read the version string properly
+my
+$VERSION    = '9.3.9';
+
+#----------------                                                                                                    
+# Main
+#---------------- 
+
+## process command line options
+my $opts = get_options();
+
+## ensure some arguments are given
+&usage unless (
+      ($opts->{version})   || 
+      ($opts->{commit})    || 
+      ($opts->{reload})    ||
+      ($opts->{upload})    || 
+      ($opts->{download})  ||
+      ($opts->{rcs})
+      );
+
+## show version and exit
+&version if ($opts->{version});
+
+## show developer release version
+&rcs_version if ($opts->{rcs});
+
+## use alternate config file or none based on cli flags
+if ($opts->{config}) {
+  chomp $opts->{config};
+  $config_file = $opts->{config};
+} elsif ($opts->{'no-configfile'}) {
+   $config_file = "";
+}
+
+
+## check on the config file existence unless told not to use one
+die "\nCould not find the config file!\n\n" if ( !$opts->{'no-configfile'} &&
+                                                 !-e "$config_file" );
+
+
+## quick sanity check to see if host was specified if we aren't using
+## a config file
+die "\nMust specify host if you aren't going to use a config file!\n\n" 
+  if (!$opts->{host} && $opts->{'no-configfile'});
+
+## read in config file
+my $ini = new Config::IniFiles( -file => $config_file, 
+                                -nocase => 1,
+                                -default => 'global');
+
+if ($opts->{upload} && $opts->{download}) {
+  print "\nYou cannot upload and download at the same time.\n\n";
+} else {
+  &queue_list_of_nodes;
+}
+
+##
+## SUBROUTINES
+##
+
+sub rcs_version { 
+  print "\n  This is RCS revision " . (qw$Revision: 1.32 $)[-1] . "\n\n";
+  exit;
+}
+
+sub version {
+  print "\n  This is Pancho version $VERSION\n\n";
+  exit;
+}
+
+sub queue_list_of_nodes {
+
+  my $process;
+
+  if ($opts->{fork}) {
+    my $limit = $ini->val('global','forklimit') || '10';
+    $process = new Parallel::ForkManager($limit);
+  }
+
+  ## set at least one section for the host specified
+  ## on the command line if we aren't using a config file
+  $ini->AddSection($opts->{host}) if ($opts->{'no-configfile'});
+
+  ## loop over configured nodes
+  for my $i ($ini->Sections()) {
+
+    ## declare hash of options to be passed between sub-routines
+    my %args = (
+         src   => '',
+         dst   => '',
+         host  => '',
+         node  => '',
+         file  => '',
+         path  => '',
+         vndr  => '',
+         desc  => '',
+         err   => '',
+         vlan  => '',
+         log   => '',
+         snmp  => '',
+         util  => '',
+	 nick  => '',
+      );
+    ## init util object
+    $args{util} = Pancho::Util->new($ini,$opts);
+
+    ## init log object
+    $args{log} = Pancho::Log->new($ini,$opts);
+
+    ## init snmp object
+    $args{snmp} = Pancho::Snmp->new($ini,$opts);
+
+    ## skip if global section
+    next if ($i =~ /^global$/i);
+
+    ## put node into hash so it can be passed to other subroutines
+    $args{host} = $i;
+
+    ## if fork option is selected
+    if ($opts->{fork}) {
+
+      $process->start and next;
+        
+      ## spawn child process to act upon node
+      &filter_by_regex(\%args);
+
+      $process->finish;
+
+    ## non-forking process
+    } else {
+
+      ## send node to be acted upon
+      &filter_by_regex(\%args);
+
+    }
+
+  ## end of for loop
+  }
+
+  $process->wait_all_children 
+    if $opts->{fork};  
+
+  ## exit pancho
+  exit;
+
+## end subroutine
+}
+
+sub filter_by_regex {
+
+  ## pull in dialogue from previous sub-routine
+  my $args = shift;
+
+  ## take into account individual host regex
+  if ($opts->{host}) {
+
+    $opts->{regex} = "^$opts->{host}\$";
+
+    my $presence = grep(/$opts->{regex}/, $ini->Sections());
+
+    unless ($presence || $opts->{'no-configfile'}) {
+
+      ## cosmetic error corrected vi erick powell
+      ## incorrect hostname would show up in logging file
+      $args->{host} = $opts->{host};
+      $args->{err} = "The following host does not appear to have an entry within the config file : $opts->{host}";
+
+      $args->{log}->log_action($args);
+
+      exit;
+
+    }
+
+  }
+
+  ## test to see if hostname fits regex description
+  return 1 if (($opts->{regex}) and ($args->{host} !~ /$opts->{regex}/));
+
+  ## test to see if hostname is group member
+  return 1 if (($opts->{group}) and 
+               ($ini->val($args->{host},'group') !~ /^$opts->{group}$/i));
+
+  ## test to see if host resolves to ip address
+  my $node = $ini->val($args->{host},'ipaddress') || 
+                       $args->{util}->discover_host_address($args) || '';
+
+  if (!$node) {
+    
+    ## if not, create a suitable message and move to next host
+    $args->{err} = "The following hostname could not be resolved: $args->{host}";
+
+    ## log to stderr and log file if necessary
+    $args->{log}->log_action($args);
+
+    ## skip to next host in list
+    return 1;
+
+  } else {
+
+    ## CJM placeholder for area to exit routine for a --dry-run
+    ## option. This will also require turning off logging in the
+    ## various statements above.
+
+    ## ::NICK:: assignment
+    $args->{nick} = $ini->val($args->{host},'nickname') || '';
+
+    ## ::NODE:: assignment
+    $args->{node} = $node;
+
+    ## pass values along to utils for dynamic substitution
+    $args->{util}->set_params($args,$opts)
+      if ($opts->{upload} || $opts->{download});
+    &discover_vendor($args);
+  }
+  
+  ## explicitly exit the child process
+  exit if ($opts->{fork});
+}
+
+sub discover_vendor {
+  my $args = shift;
+
+  ## sysdescr OID
+  my %oid = ( version => ".1.3.6.1.2.1.1.1.0" );
+
+  ## set up initial parameters for this nodes snmp session(s)
+  my $s = $args->{snmp}->create_snmp($args);
+
+  ## test for successful presence of a net::snmp session
+  if (!$s) {
+    $args->{err} = "SNMP session failed to be created for $args->{host}!";
+    $args->{log}->log_action($args);
+    return 1;
+  }
+
+  ## grab the ios major revision number
+  my $vendor_description = $s->get_request($oid{version});
+
+  ## grab an error if it exists
+  $args->{err} = $s->error;
+
+  ## close the snmp session
+  $s->close;
+
+  ## if the ios is undeterminable log it to screen and skip
+  if ($args->{err}) {
+    ## if the remote device is not able to be queried
+    $args->{log}->log_action($args);
+    ## after logging the error, skip to next host
+    return 1;
+  }
+
+  ## place sysDescr return into $args value
+  $args->{desc} = $vendor_description->{$oid{version}};
+
+  ## place vlan into args 
+  $args->{vlan} = $ini->val($args->{host},'Vlan');
+
+  ## find plugin
+  my $plugin = $args->{util}->find_plugin($args->{desc});
+
+  if ($plugin) {
+     ## run any pre commands
+     return if ($args->{util}->pre_process($args));
+     ## place our vendor into our dialogue hash
+     $args->{vndr} = $plugin->device_description($args->{desc});
+     ## run sub for vendor
+     $plugin->process_device($args,$opts);
+     ## run post commands
+     $args->{util}->post_process($args);
+  } else {
+     ## create an error message
+     $args->{err} = "Unable to determine plugin for $args->{host}";
+     ## log the device 
+     $args->{log}->log_action($args); 
+  }
+}
+
+
+#------------------------------------------------------------------------------- 
+# get_options
+# processes command line options
+# OUT: hash containing various options that have been set 
+#------------------------------------------------------------------------------- 
+sub get_options {
+   my %opt;
+   my @options = qw(upload
+                    download
+                    commit
+                    reload
+                    start
+                    path=s
+                    filename=s
+                    group=s
+                    host=s
+                    regex=s
+                    rcs
+                    version
+                    help
+                    config=s
+                    fork
+                    vlan
+                    pre:s
+                    post:s
+                    tftpserver=s
+                    snmp-version=s
+                    snmp-community=s
+                    snmp-mtu=s
+                    snmp-retry=s
+                    snmp-wait=s
+                    snmp-user=s
+                    snmp-authkey=s
+                    snmp-authpasswd=s
+                    snmp-authprotocol=s
+                    no-configfile
+                 );
+   foreach (@options) {
+      my $option = $_;
+      $option =~ s/[!+]//; 
+      $option =~ s/[=:]\w+//; 
+      $opt{$option} = '';
+   }
+
+   # set pre/post to 0 to handle option of passing cli string
+   $opt{pre}  = 0;
+   $opt{post} = 0;
+   GetOptions (\%opt, @options);
+   # handle setting these to a true value if they are now empty
+   # since that's what getopt does to it if they were specified w/o
+   # a string
+   if ($opt{pre} eq "")  { $opt{pre}  = 1; };
+   if ($opt{post} eq "") { $opt{post} = 1; };
+   return \%opt;
+}
+
+#------------------------------------------------------------------------------- 
+# usage
+# print usage
+#------------------------------------------------------------------------------- 
+sub usage {
+print <<USAGE;
+
+options   [ --upload | --download ]
+          [ --commit ]
+          [ --start]
+          [ --reload ]
+          [ --filename <filename> ]
+          [ --group <groupname> ]
+          [ --host <hostname> ]
+          [ --regex <regular expression> ]
+          [ --path <path within tftproot> ]
+          [ --fork ]
+          [ --pre | --pre <pre command> ]
+          [ --post | --post <post command> ]
+          [ --config <path to config file> ]
+          [ --vlan ]
+          [ --version ]
+          [ --help ]
+      
+          [ --tftpserver <tftpserver> ]
+          [ --snmp-version <version> ]
+          [ --snmp-community <community string> ]
+          [ --snmp-mtu <mtu size> ]
+          [ --snmp-retry <retry number> ]
+          [ --snmp-wait <timeout> ]
+          [ --snmp-user <v3 username> ]
+          [ --snmp-authkey <v3 key> ]
+          [ --snmp-authpasswd <v3 password> ]
+          [ --snmp-authprotocol <v3 protocol> ]
+          [ --no-configfile ]
+
+USAGE
+exit;
+}
